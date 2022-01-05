@@ -32,7 +32,7 @@
 #include <event.h>
 #include <libconfig.h>
 
-#include "uthash/uthash.h"
+#include "uthash.h"
 #include "tap.h"
 #include "utils.h"
 #include "libworkqueue.h"

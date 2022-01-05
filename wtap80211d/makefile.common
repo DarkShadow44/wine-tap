@@ -4,8 +4,8 @@
 #
 
 build_option ?= default
-libevent_option ?= custom
-libnl_option ?= custom
+libevent_option ?= default
+libnl_option ?= default
 glibc_option ?= default
 
 # # ARCH = $(addprefix, -, $(shell dpkg --print-architecture))
