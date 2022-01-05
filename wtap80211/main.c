@@ -1732,8 +1732,9 @@ static const struct genl_ops wtap_genl_ops[] = {/*{{{*/
 static int wtap_genl_init(void) {/*{{{*/
     int err = 0;
 
-    //err = genl_register_family_with_ops_groups(&wtap_genl_family,
-    //        wtap_genl_ops, wtap_genl_mcgrps);
+    wtap_genl_family.ops = wtap_genl_ops;
+    wtap_genl_family.mcgrps = wtap_genl_mcgrps;
+    err = genl_register_family(&wtap_genl_family);
     if (err) {
         return -EINVAL;
     }
