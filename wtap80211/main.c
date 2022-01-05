@@ -27,8 +27,7 @@
 #include <linux/netdevice.h>
 
 // IEEE 802.11
-/* #include <linux/ieee80211.h> */
-#include "ieee80211.h"
+#include <linux/ieee80211.h>
 
 // mac80211
 #include <net/mac80211.h>
@@ -47,11 +46,7 @@
 #include "genl.h"
 #include "utils.h"
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,4,0)
-MODULE_LICENSE("Dual BSD/GPL");
-#else
 MODULE_LICENSE("GPL");
-#endif
 
 MODULE_AUTHOR("Arata Kato");
 MODULE_DESCRIPTION("wtap80211: Wireless network tap device for IEEE 802.11");
@@ -586,21 +581,10 @@ static int wtap_fops_simple_test_write(void *data, u64 val) {/*{{{*/
 DEFINE_SIMPLE_ATTRIBUTE(wtap_fops_simple_test,
         wtap_fops_simple_test_read, wtap_fops_simple_test_write, "%llu\n");
 
-/* Main test */
-static int wtap_fops_test_open(struct inode *inode, struct file *file) {/*{{{*/
-    file->private_data = &inode->i_rdev;
-    return 0;
-}/*}}}*/
-
 /* Memo: @len is the size of @buf */
 static ssize_t wtap_fops_test_read(struct file *file, char __user *buf,/*{{{*/
         size_t len, loff_t *ppos)
 {
-    struct wtap_shared *shared = &wtap_shared;
-    struct inode *inode = file->f_inode;
-    struct wtap_priv *priv = inode->i_private;
-    struct sk_buff *skb = NULL;
-
     return 0;
 
 }/*}}}*/
@@ -715,23 +699,6 @@ static inline u8 get_active_freq(struct wtap_priv *priv) {/*{{{*/
     return freq;
 }/*}}}*/
 
-static int wtap_append_auth_ack_to_genlmsg(struct sk_buff *skb,/*{{{*/
-        void *_data)
-{
-    struct wtap_shared *shared = &wtap_shared;
-    void *data = NULL;
-
-    data = genlmsg_put(skb, shared->portid, 0,
-            &wtap_genl_family, 0, WTAP_GENL_CMD_AUTH_ACK);
-    if (!data) {
-        genlmsg_cancel(skb,data);
-        return -EINVAL;
-    }
-
-    genlmsg_end(skb, data);
-    return 0;
-}/*}}}*/
-
 static void wtap_get_addrlist_all(char *buf);
 
 static int wtap_append_addrlist(struct sk_buff *skb, void *data)/*{{{*/
@@ -764,59 +731,10 @@ static int wtap_append_addrlist(struct sk_buff *skb, void *data)/*{{{*/
     return 0;
 }/*}}}*/
 
-static int wtap_append_frame_to_genlmsg(struct sk_buff *skb,/*{{{*/
-        void *_data)
-{
-    struct wtap_shared *shared = &wtap_shared;
-    struct wtap_frame_container *cn =
-        (struct wtap_frame_container*)_data;
-    struct ieee80211_tx_info *tx_info = IEEE80211_SKB_CB(skb);
-    struct ieee80211_hw *hw = cn->hw;
-    struct ieee80211_channel *channel = cn->channel;
-    void *data = NULL;
-    u32 freq = 0;
-    int err = 0;
-
-    data = genlmsg_put(skb, shared->portid, 0,
-            &wtap_genl_family, 0, WTAP_GENL_CMD_TX_FRAME);
-    if (!data) {
-        genlmsg_cancel(skb, data);
-        return -EINVAL;
-    }
-
-    err = nla_put(skb, WTAP_GENL_ATTR_DOT_ELEVEN_FRAME,
-            cn->skb->len, cn->skb->data);
-    if (err < 0) { return err; }
-
-    err = nla_put(skb, WTAP_GENL_ATTR_TX_INFO,
-            sizeof(*tx_info), tx_info);
-    if (err < 0) { return err; }
-
-    freq = get_active_freq(hw->priv);
-    err = nla_put(skb, WTAP_GENL_ATTR_FREQUENCY, sizeof(freq), &freq);
-    if (err < 0) { return err; }
-
-    if (channel) {
-        err = nla_put(skb, WTAP_GENL_ATTR_CHANNEL,
-                sizeof(*channel), channel);
-        if (err < 0) { return err; }
-    }
-
-    /*
-     * debug_msg("  tx_info: flags = %#x, band = %d, queue = %d, ack_id = %d",
-     *     tx_info->flags, tx_info->band, tx_info->hw_queue, tx_info->ack_frame_id);
-     */
-
-    genlmsg_end(skb, data);
-
-    return 0;
-}/*}}}*/
-
 static struct sk_buff* wtap_build_genlmsg(/*{{{*/
         int (*genlmsg_formatter)(struct sk_buff *skb, void *data),
         void *data)
 {
-    struct wtap_frame_container *cn = data;
     struct sk_buff *skb = NULL;
     int err = 0;
 
@@ -833,98 +751,6 @@ static struct sk_buff* wtap_build_genlmsg(/*{{{*/
     }
 
     return skb;
-}/*}}}*/
-
-static void __wtap_tx(struct work_struct *_work) {/*{{{*/
-    struct wtap_shared *shared = &wtap_shared;
-    struct wtap_work_struct *work =
-        container_of(_work, struct wtap_work_struct, work);
-    struct wtap_priv *priv = work->priv;
-    struct wtap_frame_container cn = {0};
-    struct sk_buff *frame_skb = work->data;
-    struct sk_buff *genl_skb = NULL;
-    struct ieee80211_hdr *hdr = (void*)frame_skb->data;
-    int err = 0;
-
-    cn.hw = priv->hw;
-    cn.skb = work->data;
-    cn.channel = work->channel;
-
-    debug_msg("__wtap_tx");
-    ieee80211_free_txskb(priv->hw, work->data);
-    kfree(_work);
-    return ;
-
-    genl_skb = wtap_build_genlmsg(wtap_append_frame_to_genlmsg, &cn);
-    if (!genl_skb) {
-        err = -ENOMEM;
-        goto error;
-    }
-
-    err = genlmsg_unicast(&init_net, genl_skb, shared->portid);
-    if (err != 0) {
-        if (printk_ratelimit()) {
-            error_msg("could not send %s frame (%pM -> %pM) to the user space.",
-                    ieee80211_fctl_name[wtap_dbg_search_fctl(hdr)],
-                    hdr->addr2, hdr->addr1);
-        }
-        goto error;
-    }
-
-    ieee80211_free_txskb(priv->hw, work->data);
-    kfree(_work);
-
-    return ;
-
-error:
-    ieee80211_free_txskb(priv->hw, work->data);
-    spin_lock_bh(&shared->spinlock);
-    priv->tx_dropped += frame_skb->len;
-    priv->tx_failed++;
-    spin_unlock_bh(&shared->spinlock);
-    kfree(_work);
-}/*}}}*/
-
-static int _wtap_tx(struct ieee80211_hw *hw,/*{{{*/
-        struct sk_buff *_skb,
-        struct ieee80211_channel *channel)
-{
-    struct wtap_shared *shared = &wtap_shared;
-    struct wtap_priv *priv = hw->priv;
-    struct wtap_frame_container cn = {0};
-    struct sk_buff *skb = NULL;
-    struct ieee80211_hdr *hdr = (void*)_skb->data;
-    int err = 0;
-
-    cn.hw = hw;
-    cn.skb = _skb;
-    cn.channel = channel;
-
-    skb = wtap_build_genlmsg(wtap_append_frame_to_genlmsg, &cn);
-    if (!skb) {
-        err = -ENOMEM;
-        goto out_ieee80211_free_txskb;
-    }
-
-    err = genlmsg_unicast(&init_net, skb, shared->portid);
-    if (err != 0) {
-        if (printk_ratelimit()) {
-            error_msg("could not send %s frame (%pM -> %pM) to the user space.",
-                    ieee80211_fctl_name[wtap_dbg_search_fctl(hdr)],
-                    hdr->addr2, hdr->addr1);
-        }
-        return err;
-    }
-
-    return 0;
-
-out_ieee80211_free_txskb:
-    ieee80211_free_txskb(hw, _skb);
-    spin_lock_bh(&shared->spinlock);
-    priv->tx_dropped += _skb->len;
-    priv->tx_failed++;
-    spin_unlock_bh(&shared->spinlock);
-    return err;
 }/*}}}*/
 
 static u32 calc_fcs(const unsigned char *data, int len);
@@ -1205,10 +1031,6 @@ static int wtap_genl_ops_auth(struct sk_buff *_skb,/*{{{*/
 
 static int wtap_genl_ops_loopback(struct sk_buff *skb, struct genl_info *info)
 {
-    struct wtap_shared *shared = &wtap_shared;
-    struct nlmsghdr *nlhdr = (struct nlmsghdr *)skb->data;
-    struct genlmsghdr *genlhdr = (struct genlmsghdr *)nlmsg_data(nlhdr);
-
     return 0;
 }
 
@@ -1358,173 +1180,6 @@ static void wtap_tx_frame_loopback(struct ieee80211_hw *hw,/*{{{*/
     spin_unlock(&wtap_shared.spinlock);
 }/*}}}*/
 
-static void wtap_rx_active_iface_iterator(void *data, u8 *addr,/*{{{*/
-        struct ieee80211_vif *vif)
-{
-    struct wtap_shared *shared = &wtap_shared;
-    struct rx_iter_container *cn = data;
-    struct wtap_vif_priv *vpriv = (struct wtap_vif_priv *)vif->drv_priv;
-    struct ieee80211_channel *vif_chan = rcu_dereference(vif->chanctx_conf)->def.chan;
-
-    cn->is_active_iface_found = false;
-
-    if (!vif->chanctx_conf || !vpriv->ctx_assigned)
-        return;
-
-    if (cn->freq == vif_chan->center_freq)
-        cn->is_active_iface_found = true;
-
-    if (vpriv->bss_conf.qos)
-        cn->is_qos_enabled = true;
-
-}/*}}}*/
-
-static void wtap_rx(struct wtap_priv *priv,/*{{{*/
-        struct sk_buff *skb)
-{
-    /* ieee80211_rx_irqsafe(priv->hw, skb); */
-    ieee80211_rx(priv->hw, skb);
-}/*}}}*/
-
-static bool is_src_hwaddr(struct wtap_priv *priv,/*{{{*/
-        struct ieee80211_hdr *hdr)
-{
-    char *perm_addr = priv->hw->wiphy->perm_addr;
-    char *sa = NULL;
-
-    if (ieee80211_is_ctl(hdr->frame_control) ||
-            ieee80211_is_mgmt(hdr->frame_control)) {
-        sa = ((struct ieee80211_mgmt*)hdr)->sa;
-    } else if (ieee80211_is_data(hdr->frame_control)) {
-        sa = hdr->addr2;
-    }
-
-    return ((memcmp(sa, perm_addr, ETH_ALEN)) == 0);
-}/*}}}*/
-
-static bool is_rx_status_valid(struct wtap_priv *priv,/*{{{*/
-        struct ieee80211_hdr *hdr,
-        struct ieee80211_rx_status *rx_status)
-{
-    struct ieee80211_channel *channel = NULL;
-
-    if (priv->channel) {
-        channel = priv->channel;
-    } else if (priv->tmp_channel) {
-        channel = priv->tmp_channel;
-    } else {
-        struct rx_iter_container rx_iter_container = {
-            .freq = rx_status->freq,
-            .is_active_iface_found = false,
-            .is_qos_enabled = false,
-        };
-
-        ieee80211_iterate_active_interfaces_atomic(priv->hw,
-                IEEE80211_IFACE_ITER_NORMAL,
-                wtap_rx_active_iface_iterator,
-                &rx_iter_container);
-
-        if (!rx_iter_container.is_active_iface_found)
-            return false;
-
-        return true;
-    }
-
-    if (channel->center_freq != rx_status->freq)
-        return false;
-
-    return true;
-}/*}}}*/
-
-static void wtap_rx_work(struct work_struct *_work) {/*{{{*/
-    struct wtap_work_struct *work =
-        container_of((void*)_work, struct wtap_work_struct, work);
-    struct ieee80211_hdr *hdr = work->data;
-    unsigned int frame_len = work->datalen;
-    struct ieee80211_rx_status rx_status = {0};
-    u64 now = 0;
-
-    struct sk_buff *rx_skb = NULL;
-    struct wtap_shared *shared = &wtap_shared;
-    struct wtap_priv *priv = NULL;
-    bool is_received = false;
-
-    memcpy(&rx_status, work->rx_status, sizeof(rx_status));
-
-    /*
-     * rx_skb = alloc_skb(frame_len, GFP_KERNEL);
-     * if (!rx_skb) {
-     *   error_msg("could not allocate memory for rx_skb.");
-     *   goto out;
-     * }
-     * memcpy(skb_put(rx_skb, frame_len), hdr, frame_len);
-     */
-
-    if (!ieee80211_is_beacon(hdr->frame_control)) {
-        debug_msg("(1)RX %s frame (len = %d) (%pM -> %pM)"
-                " (freq = %d, band = %d, signal = %d)",
-                ieee80211_fctl_name[wtap_dbg_search_fctl(hdr)],
-                frame_len, hdr->addr2, hdr->addr1,
-                rx_status.freq, rx_status.band, rx_status.signal);
-    }
-
-    return ;
-
-    spin_lock_bh(&shared->spinlock);
-
-    list_for_each_entry(priv, &shared->dev_list, list) {
-
-        if (!priv->started || (priv->idle & !priv->tmp_channel))
-            continue;
-
-        if (is_src_hwaddr(priv, hdr))
-            continue;
-
-        if (!is_rx_status_valid(priv, hdr, &rx_status))
-            continue;
-
-        rx_skb = alloc_skb(frame_len, GFP_KERNEL);
-        if (!rx_skb) {
-            spin_unlock_bh(&shared->spinlock);
-            goto out;
-        }
-
-        /*
-         * if (ieee80211_is_beacon(hdr->frame_control) ||
-         *     ieee80211_is_probe_resp(hdr->frame_control)) {
-         *   now = priv->abs_bcn_ts;
-         * } else {
-         *   now = wtap_get_time_us();
-         * }
-         */
-
-        now = wtap_get_time_us() + 1000;
-        rx_status.mactime = now + priv->tsf_offset;
-
-        memcpy(skb_put(rx_skb, frame_len), hdr, frame_len);
-        memcpy(IEEE80211_SKB_RXCB(rx_skb), &rx_status, sizeof(rx_status));
-
-        priv->rx_packets++;
-        priv->rx_bytes += frame_len;
-        wtap_rx(priv, rx_skb);
-        is_received = true;
-
-        if (!ieee80211_is_beacon(hdr->frame_control)) {
-            debug_msg("(2)RX %s frame (len = %d) (%pM -> %pM)"
-                    " (freq = %d, band = %d, signal = %d) (mt %llu [us])",
-                    ieee80211_fctl_name[wtap_dbg_search_fctl(hdr)],
-                    frame_len, hdr->addr2, hdr->addr1,
-                    rx_status.freq, rx_status.band, rx_status.signal,
-                    rx_status.mactime);
-        }
-    }
-
-    spin_unlock_bh(&shared->spinlock);
-
-out:
-    kfree(_work);
-}/*}}}*/
-
 static struct wtap_priv* search_dst_hw(struct ieee80211_hdr *hdr)/*{{{*/
 {
     struct wtap_priv *priv, *ret = NULL;
@@ -1549,7 +1204,7 @@ static int wtap_rx_broadcast(struct genl_info *info)/*{{{*/
     unsigned int frame_len = nla_len(info->attrs[WTAP_GENL_ATTR_DOT_ELEVEN_FRAME]);
     struct ieee80211_rx_status rx_status = {0};
     struct sk_buff *rx_skb = NULL;
-    struct wtap_priv *first, *priv = NULL;
+    struct wtap_priv *priv = NULL;
     /* u64 now = 0; */
     unsigned int dev_count = 0;
 
@@ -1629,7 +1284,6 @@ memory_error:
 
 static int wtap_genl_ops_rx_frame(struct sk_buff *skb, struct genl_info *info)
 {
-    struct wtap_shared *shared = &wtap_shared;
     struct wtap_priv *priv = NULL;
     struct ieee80211_hdr *hdr = NULL;
     struct ieee80211_channel *channel = NULL;
@@ -1637,9 +1291,7 @@ static int wtap_genl_ops_rx_frame(struct sk_buff *skb, struct genl_info *info)
     struct ieee80211_rx_status rx_status = {0};
     unsigned int frame_len = 0;
     struct sk_buff *rx_skb = NULL;
-    bool is_received = false;
     u64 now = 0;
-    int err = 0;
 
     if (!info->attrs[WTAP_GENL_ATTR_DOT_ELEVEN_FRAME] ||
             !info->attrs[WTAP_GENL_ATTR_TX_INFO] ||
@@ -1850,10 +1502,6 @@ static void wtap_tx_beacon(void *arg, u8 *addr, struct ieee80211_vif *vif) {/*{{
     mgmthdr = (struct ieee80211_mgmt*)skb->data;
 
     info = IEEE80211_SKB_CB(skb);
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,4,0)
-    if (hw->flags & IEEE80211_HW_SUPPORTS_RC_TABLE) {}
-#endif
 
     // Set counterfeit transmission time
     priv->abs_bcn_ts = wtap_get_time_us();
@@ -2173,13 +1821,8 @@ static int wtap_ops_config(struct ieee80211_hw *hw,/*{{{*/
                 smps_modes[conf->smps_mode]);
     }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,4,0)
-    info_msg("  max_sleep_period = %d, ps_dtim_period = %d, ps_timeout = %d",
-            conf->max_sleep_period, conf->ps_dtim_period, conf->dynamic_ps_timeout);
-#else
     info_msg("  ps_dtim_period = %d, ps_timeout = %d",
             conf->ps_dtim_period, conf->dynamic_ps_timeout);
-#endif
     info_msg("  radar detection %s", (conf->radar_enabled)? "enabled": "disabled");
     info_msg("  minimum TX power changed %d => %d [dBm]", priv->power_level, conf->power_level);
 
@@ -2224,15 +1867,6 @@ static void wtap_ops_configure_filter(struct ieee80211_hw *hw,/*{{{*/
     struct wtap_priv *priv = hw->priv;
 
     priv->rx_filter = 0;
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,4,0)
-    if (*total_flags & FIF_PROMISC_IN_BSS) {
-        priv->rx_filter |= FIF_PROMISC_IN_BSS;
-    }
-    if (*total_flags & FIF_ALLMULTI) {
-        priv->rx_filter |= FIF_ALLMULTI;
-    }
-#endif
 
     *total_flags = priv->rx_filter;
 }/*}}}*/
@@ -2540,34 +2174,6 @@ static int wtap_ops_get_survey(struct ieee80211_hw *hw,/*{{{*/
     return 0;
 }/*}}}*/
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,4,0)
-static int wtap_ops_ampdu_action(struct ieee80211_hw *hw,/*{{{*/
-        struct ieee80211_vif *vif,
-        enum ieee80211_ampdu_mlme_action action,
-        struct ieee80211_sta *sta,
-        u16 tid, u16 *ssn,
-        u8 buf_size)
-{
-    switch (action) {
-        case IEEE80211_AMPDU_TX_START:
-            ieee80211_start_tx_ba_cb_irqsafe(vif, sta->addr, tid);
-            break;
-        case IEEE80211_AMPDU_TX_STOP_CONT:
-        case IEEE80211_AMPDU_TX_STOP_FLUSH:
-        case IEEE80211_AMPDU_TX_STOP_FLUSH_CONT:
-            ieee80211_stop_tx_ba_cb_irqsafe(vif, sta->addr, tid);
-            break;
-        case IEEE80211_AMPDU_TX_OPERATIONAL:
-            break;
-        case IEEE80211_AMPDU_RX_START:
-        case IEEE80211_AMPDU_RX_STOP:
-            break;
-        default:
-            return -EOPNOTSUPP;
-    }
-    return 0;
-}/*}}}*/
-#else
 static int wtap_ops_ampdu_action(struct ieee80211_hw *hw,/*{{{*/
         struct ieee80211_vif *vif,
         struct ieee80211_ampdu_params *params)
@@ -2591,7 +2197,6 @@ static int wtap_ops_ampdu_action(struct ieee80211_hw *hw,/*{{{*/
     }
     return 0;
 }/*}}}*/
-#endif
 
 static void wtap_ops_sw_scan_start(struct ieee80211_hw *hw,/*{{{*/
         struct ieee80211_vif *vif,
@@ -2652,12 +2257,8 @@ static void wtap_ops_set_tsf(struct ieee80211_hw *hw,/*{{{*/
     struct wtap_priv *priv = hw->priv;
     u64 now = wtap_get_tsf(priv);
     u32 beacon_int = priv->beacon_interval;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,4,0)
-    u64 delta = abs64(tsf - now);
-#else
     /* u64 delta = ((tsf - now) < 0) ? -(tsf - now) : (tsf - now); */
     u64 delta = tsf - now;
-#endif
 
     if (tsf > now) {
         priv->tsf_offset += delta;
@@ -2818,7 +2419,6 @@ static int wtap_ops_cancel_remain_on_channel(struct ieee80211_hw *hw, struct iee
 static int wtap_ops_add_chanctx(struct ieee80211_hw *hw,/*{{{*/
         struct ieee80211_chanctx_conf *ctx)
 {
-    struct wtap_shared *shared = &wtap_shared;
     struct wtap_priv *priv = hw->priv;
     struct wtap_chanctx_priv *ctx_priv = (void*)ctx->drv_priv;
     u32 new_ctx_id = 0;
@@ -2849,8 +2449,6 @@ static void wtap_ops_change_chanctx(struct ieee80211_hw *hw,/*{{{*/
         struct ieee80211_chanctx_conf *ctx,
         u32 changed)
 {
-    struct wtap_shared *shared = &wtap_shared;
-    struct wtap_priv *priv = hw->priv;
     struct wtap_chanctx_priv *ctx_priv = (void*)ctx->drv_priv;
 
     info_msg("channel context changed (HWaddr = %pM, ctx_id = %#x): "
@@ -2871,8 +2469,6 @@ static void wtap_ops_change_chanctx(struct ieee80211_hw *hw,/*{{{*/
 static void wtap_ops_remove_chanctx(struct ieee80211_hw *hw,/*{{{*/
         struct ieee80211_chanctx_conf *ctx)
 {
-    struct wtap_shared *shared = &wtap_shared;
-    struct wtap_priv *priv = hw->priv;
     struct wtap_chanctx_priv *ctx_priv = (void*)ctx->drv_priv;
 
     info_msg("channel context removed (HWaddr = %pM, ctx_id = %#x): "
@@ -2896,7 +2492,6 @@ static int wtap_ops_assign_vif_chanctx(struct ieee80211_hw *hw,/*{{{*/
     struct wtap_priv *priv = hw->priv;
     struct wtap_vif_priv *vif_priv = (void*)vif->drv_priv;
     struct wtap_chanctx_priv *ctx_priv = (void*)ctx->drv_priv;
-    int i = 0;
 
     mutex_lock(&priv->mutex);
 
@@ -2927,7 +2522,6 @@ static void wtap_ops_unassign_vif_chanctx(struct ieee80211_hw *hw,/*{{{*/
     struct wtap_priv *priv = hw->priv;
     struct wtap_vif_priv *vif_priv = (void*)vif->drv_priv;
     struct wtap_chanctx_priv *ctx_priv = (void*)ctx->drv_priv;
-    int i = 0;
 
     mutex_lock(&priv->mutex);
 
@@ -3238,20 +2832,6 @@ static void wtap_set_hw_flags_and_property(struct wtap_priv *priv) {/*{{{*/
     const char *fw_version = "No firmware";
     struct ieee80211_hw *hw = priv->hw;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,4,0)
-    hw->flags |= IEEE80211_HW_SIGNAL_DBM |
-        IEEE80211_HW_SUPPORTS_PS |
-        IEEE80211_HW_SUPPORTS_UAPSD |
-        IEEE80211_HW_SUPPORTS_HT_CCK_RATES |
-        IEEE80211_HW_SPECTRUM_MGMT |
-        IEEE80211_HW_MFP_CAPABLE |
-        IEEE80211_HW_AP_LINK_PS |
-        IEEE80211_HW_WANT_MONITOR_VIF |
-        IEEE80211_HW_QUEUE_CONTROL |
-        /* IEEE80211_HW_RX_INCLUDES_FCS | */
-        IEEE80211_HW_CHANCTX_STA_CSA |
-        IEEE80211_HW_AMPDU_AGGREGATION;
-#else
     ieee80211_hw_set(hw, SIGNAL_DBM);
     ieee80211_hw_set(hw, SUPPORTS_PS);
     /* ieee80211_hw_set(hw, SUPPORTS_UAPSD); */
@@ -3264,7 +2844,6 @@ static void wtap_set_hw_flags_and_property(struct wtap_priv *priv) {/*{{{*/
     ieee80211_hw_set(hw, RX_INCLUDES_FCS);
     ieee80211_hw_set(hw, CHANCTX_STA_CSA);
     ieee80211_hw_set(hw, AMPDU_AGGREGATION);
-#endif
 
     hw->vif_data_size = sizeof(struct wtap_vif_priv);
     hw->sta_data_size = sizeof(struct wtap_sta_priv);

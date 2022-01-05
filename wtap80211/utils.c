@@ -16,7 +16,7 @@
 #include <linux/netlink.h>
 #include <net/genetlink.h>
 
-#include "ieee80211.h"
+#include <linux/ieee80211.h>
 #include "utils.h"
 
 const char *ieee80211_fctl_name[IEEE80211_FCTL_INDEX_MAX + 1] = {
@@ -58,11 +58,18 @@ const char *iftype_modes[NL80211_IFTYPE_MAX + 1] = {
     [NL80211_IFTYPE_OCB]        = "ocb",
 };
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
-static int (*ieee80211_iss[IEEE80211_FCTL_INDEX_MAX + 1])(__le16 fc);
-#else
 static bool (*ieee80211_iss[IEEE80211_FCTL_INDEX_MAX + 1])(__le16 fc);
-#endif
+
+
+/*
+ * ieee80211_is_qos - check if IEEE80211_STYPE_QOS_DATA
+ * @fc: frame control bytes in little-endian byteoder
+ */
+
+static bool ieee80211_is_qos(__le16 fc) {
+    return ((fc & cpu_to_le16(IEEE80211_FCTL_FTYPE | IEEE80211_FCTL_STYPE)) ==
+            cpu_to_le16(IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_DATA));
+}
 
 inline int wtap_dbg_search_fctl(struct ieee80211_hdr *hdr)
 {
@@ -105,6 +112,12 @@ inline void wtap_dbg_ieee80211_mgmt(struct ieee80211_mgmt *mgmthdr) {
             mgmthdr->da, mgmthdr->sa, mgmthdr->bssid);
     debug_msg("  seq_ctrl = %u", mgmthdr->seq_ctrl);
 }
+
+struct ieee80211_mgmt_ie {
+    u8 eid;
+    u8 len;
+    u8 elm[0];
+} __packed __aligned(2);
 
 inline void wtap_dbg_print_beacon(struct ieee80211_mgmt *mgmthdr) {
     struct ieee80211_mgmt_ie *ie = (void*)mgmthdr->u.beacon.variable;
@@ -151,11 +164,7 @@ inline void wtap_dbg_ieee80211_binary(struct ieee80211_hdr *hdr,
     }
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
-static int (*ieee80211_iss[IEEE80211_FCTL_INDEX_MAX + 1])(__le16 fc) = {
-#else
 static bool (*ieee80211_iss[IEEE80211_FCTL_INDEX_MAX + 1])(__le16 fc) = {
-#endif
     /* Note that ieee80211_is_qos is only defined in wtap80211 */
     ieee80211_is_qos,
     ieee80211_is_data,

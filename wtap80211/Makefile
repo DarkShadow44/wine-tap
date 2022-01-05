@@ -9,8 +9,9 @@ CONFIG_MODULE_SIG=n
 EXTRA_CFLAGS := -I$(SRCDIR)/include \
 				-Wall -Wextra \
 				-Wno-unused-parameter \
-				-Wno-unused-variable \
-				-Wno-unused-function \
+				-Wunused-variable \
+				-Wunused-function \
+				-Wno-type-limits \
 				-Wno-missing-field-initializers \
 				-Wno-sign-compare \
 				-Xlinker --warn-common
