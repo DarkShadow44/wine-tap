@@ -109,7 +109,7 @@ MODULE_PARM_DESC(fixed_hwaddr,
 /* Channels and rates                                                              */
 /* ------------------------------------------------------------------------------- */
 #define CHAN2G(_channel, _freq, _flags) { \
-    .band             = IEEE80211_BAND_2GHZ, \
+    .band             = NL80211_BAND_2GHZ, \
     .hw_value         = (_channel), \
     .center_freq      = (_freq), \
     .flags            = (_flags), \
@@ -118,7 +118,7 @@ MODULE_PARM_DESC(fixed_hwaddr,
 }
 
 #define CHAN5G(_channel, _flags) { \
-    .band             = IEEE80211_BAND_5GHZ, \
+    .band             = NL80211_BAND_5GHZ, \
     .hw_value         = (_channel), \
     .center_freq      = 5000 + (5 * (_channel)), \
     .flags            = (_flags), \
@@ -127,7 +127,7 @@ MODULE_PARM_DESC(fixed_hwaddr,
 }
 
 #define CHAN60G(_channel, _flags) { \
-    .band             = IEEE80211_BAND_60GHZ, \
+    .band             = NL80211_BAND_60GHZ, \
     .hw_value         = (_channel), \
     .center_freq      = 56160 + (2160 * (_channel)), \
     .flags            = (_flags), \
@@ -430,7 +430,7 @@ struct wtap_priv {/*{{{*/
     struct ieee80211_channel channels_5ghz[ARRAY_SIZE(wtap_supported_channels_5ghz)];
     struct ieee80211_channel channels_60ghz[ARRAY_SIZE(wtap_supported_channels_60ghz)];
     struct ieee80211_rate rates[ARRAY_SIZE(__wtap_supported_rates)];
-    struct ieee80211_supported_band bands[IEEE80211_NUM_BANDS];
+    struct ieee80211_supported_band bands[NUM_NL80211_BANDS];
     struct ieee80211_iface_combination iface_combination;
     struct ieee80211_channel *channel; // Current channel
     struct ieee80211_channel *tmp_channel;
@@ -459,7 +459,7 @@ struct wtap_priv {/*{{{*/
     u64 beacon_interval;
     s64 beacon_delta;
     u64 abs_bcn_ts; // Absolute beacon trasmittion time
-    struct tasklet_hrtimer beacon_timer;
+    struct hrtimer beacon_timer;
 
     // tsf
     s64 tsf_offset;
@@ -634,7 +634,7 @@ static inline u64 wtap_get_tsf(struct wtap_priv *priv) {/*{{{*/
 // Generic Netlink Family -------------------------------------------------------
 
 static struct genl_family wtap_genl_family = {/*{{{*/
-    .id = GENL_ID_GENERATE,
+    // !!TODO.id = GENL_ID_GENERATE,
     .hdrsize = 0,
     .name = "wtap80211",
     .version = 20171201,
@@ -1241,7 +1241,7 @@ static void isolate_skb(struct sk_buff *skb) {/*{{{*/
     secpath_reset(skb);
 
     /* Reset the netfilter */
-    nf_reset(skb);
+    nf_reset_ct(skb);
 }/*}}}*/
 
 struct tx_iter_data {/*{{{*/
@@ -1732,8 +1732,8 @@ static const struct genl_ops wtap_genl_ops[] = {/*{{{*/
 static int wtap_genl_init(void) {/*{{{*/
     int err = 0;
 
-    err = genl_register_family_with_ops_groups(&wtap_genl_family,
-            wtap_genl_ops, wtap_genl_mcgrps);
+    //err = genl_register_family_with_ops_groups(&wtap_genl_family,
+    //        wtap_genl_ops, wtap_genl_mcgrps);
     if (err) {
         return -EINVAL;
     }
@@ -1864,14 +1864,14 @@ static void wtap_tx_beacon(void *arg, u8 *addr, struct ieee80211_vif *vif) {/*{{
 
     wtap_tx(hw, skb, rcu_dereference(vif->chanctx_conf)->def.chan);
 
-    if (vif->csa_active && ieee80211_csa_is_complete(vif)) {
+    if (vif->csa_active && ieee80211_beacon_cntdwn_is_complete(vif)) {
         ieee80211_csa_finish(vif);
     }
 }/*}}}*/
 
 static enum hrtimer_restart wtap_beacon(struct hrtimer *timer) {/*{{{*/
     struct wtap_priv *priv =
-        container_of(timer, struct wtap_priv, beacon_timer.timer);
+        container_of(timer, struct wtap_priv, beacon_timer);
     struct ieee80211_hw *hw = priv->hw;
     u64 beacon_interval = priv->beacon_interval;
     ktime_t next_beacon = {0};
@@ -1895,7 +1895,7 @@ static enum hrtimer_restart wtap_beacon(struct hrtimer *timer) {/*{{{*/
     // Schedule next beacon
     next_beacon = ktime_add(hrtimer_get_expires(timer),
             ns_to_ktime(beacon_interval * 1000));
-    tasklet_hrtimer_start(&priv->beacon_timer, next_beacon, HRTIMER_MODE_ABS);
+    hrtimer_start(&priv->beacon_timer, next_beacon, HRTIMER_MODE_ABS);
 
     /*debug_msg("Beacon timer started.");*/
 
@@ -1922,7 +1922,7 @@ static void wtap_set_beacon_timer(struct wtap_priv *priv,/*{{{*/
         (priv->beacon_interval)? priv->beacon_interval: 1000 * 1024;
     u64 tbtt = beacon_interval - do_div(tsf, beacon_interval);
 
-    tasklet_hrtimer_start(&priv->beacon_timer,
+    hrtimer_start(&priv->beacon_timer,
             ns_to_ktime(tbtt * 1000),
             mode);
 }/*}}}*/
@@ -2025,7 +2025,7 @@ static void wtap_ops_stop(struct ieee80211_hw *hw) {/*{{{*/
     struct wtap_priv *priv = hw->priv;
 
     // Stop beacon timer
-    tasklet_hrtimer_cancel(&priv->beacon_timer);
+    hrtimer_cancel(&priv->beacon_timer);
 
     // Turn the device off
     spin_lock_bh(&shared->spinlock);
@@ -2200,8 +2200,8 @@ static int wtap_ops_config(struct ieee80211_hw *hw,/*{{{*/
 
     if (!priv->started || !priv->beacon_interval) {
         // Turn beacon timer off
-        tasklet_hrtimer_cancel(&priv->beacon_timer);
-    } else if (!hrtimer_is_queued(&priv->beacon_timer.timer)) {
+        hrtimer_cancel(&priv->beacon_timer);
+    } else if (!hrtimer_is_queued(&priv->beacon_timer)) {
         wtap_set_beacon_timer(priv, HRTIMER_MODE_REL);
     }
 
@@ -2327,7 +2327,7 @@ static void wtap_ops_bss_info_changed(struct ieee80211_hw *hw,/*{{{*/
         vp->enable_beacon = info->enable_beacon;
 
         if (info->enable_beacon) {
-            if (priv->started && !hrtimer_is_queued(&priv->beacon_timer.timer)) {
+            if (priv->started && !hrtimer_is_queued(&priv->beacon_timer)) {
                 wtap_set_beacon_timer(priv, HRTIMER_MODE_REL);
             }
         } else {
@@ -2335,7 +2335,7 @@ static void wtap_ops_bss_info_changed(struct ieee80211_hw *hw,/*{{{*/
             ieee80211_iterate_active_interfaces_atomic(hw, IEEE80211_IFACE_ITER_NORMAL,
                     wtap_enable_beacon_iterator, &count);
             if (count == 0) {
-                tasklet_hrtimer_cancel(&priv->beacon_timer);
+                hrtimer_cancel(&priv->beacon_timer);
             }
         }
     }
@@ -2735,14 +2735,14 @@ static void wtap_ops_cancel_hw_scan(struct ieee80211_hw *hw,/*{{{*/
         struct ieee80211_vif *vif)
 {
     struct wtap_priv *priv = hw->priv;
-
+    struct cfg80211_scan_info cfg = { .aborted = true };
     info_msg("scanning aborted.");
 
     // Wait for an active scanning.
     cancel_delayed_work_sync(&priv->hw_scan);
 
     mutex_lock(&priv->mutex);
-    ieee80211_scan_completed(hw, true);
+    ieee80211_scan_completed(hw, &cfg);
     priv->scan_request = NULL;
     priv->scan_vif = NULL;
     priv->tmp_channel = NULL;
@@ -2800,7 +2800,7 @@ static int wtap_ops_remain_on_channel(struct ieee80211_hw *hw,/*{{{*/
     return 0;
 }/*}}}*/
 
-static int wtap_ops_cancel_remain_on_channel(struct ieee80211_hw *hw) {/*{{{*/
+static int wtap_ops_cancel_remain_on_channel(struct ieee80211_hw *hw, struct ieee80211_vif *unk) {/*{{{*/
     struct wtap_priv *priv = hw->priv;
 
     cancel_delayed_work_sync(&priv->roc_done);
@@ -3169,7 +3169,7 @@ static struct ieee80211_sta_ht_cap wtap_create_ht_cap(void) {/*{{{*/
 
 static void wtap_set_all_channels(struct wtap_priv *priv) {/*{{{*/
     struct ieee80211_hw *hw = priv->hw;
-    enum ieee80211_band band = 0;
+    enum nl80211_band band = 0;
     struct ieee80211_sta_ht_cap ht_cap = wtap_create_ht_cap();
     struct ieee80211_sta_vht_cap vht_cap = wtap_create_vht_cap();
 
@@ -3207,23 +3207,23 @@ static void wtap_set_all_channels(struct wtap_priv *priv) {/*{{{*/
             sizeof(priv->channels_60ghz));
     memcpy(priv->rates, __wtap_supported_rates, sizeof(priv->rates));
 
-    for (band = IEEE80211_BAND_2GHZ; band < IEEE80211_NUM_BANDS; ++band) {
+    for (band = NL80211_BAND_2GHZ; band < NUM_NL80211_BANDS; ++band) {
         struct ieee80211_supported_band *sband = &priv->bands[band];
 
-        if (band == IEEE80211_BAND_2GHZ) {
+        if (band == NL80211_BAND_2GHZ) {
             sband = &wtap_supported_band_2ghz;
             sband->ht_cap = ht_cap;
             hw->wiphy->bands[band] = sband;
         }
 
-        if (band == IEEE80211_BAND_5GHZ) {
+        if (band == NL80211_BAND_5GHZ) {
             sband = &wtap_supported_band_5ghz;
             sband->ht_cap = ht_cap;
             sband->vht_cap = vht_cap;
             hw->wiphy->bands[band] = sband;
         }
 
-        if (band == IEEE80211_BAND_60GHZ) {
+        if (band == NL80211_BAND_60GHZ) {
             sband = &wtap_supported_band_60ghz;
             sband->ht_cap = ht_cap; /* Todo: redefine ht_cap for 60GHz band */
             hw->wiphy->bands[band] = sband;
@@ -3395,10 +3395,9 @@ static int wtap_register_new_device(const char *hwname) {/*{{{*/
     spin_unlock_bh(&shared->spinlock);
 
     // Initialize the beacon timer
-    tasklet_hrtimer_init(&priv->beacon_timer,
-            wtap_beacon,
+    hrtimer_init(&priv->beacon_timer,
             CLOCK_MONOTONIC_RAW, HRTIMER_MODE_ABS);
-
+    priv->beacon_timer.function = wtap_beacon;
     return 0;
 
 out_release_driver:
