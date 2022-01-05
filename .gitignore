@@ -1,0 +1,11 @@
+*.a
+*.o
+*.mri
+*.d
+*.cmd
+wtap80211d
+*.symvers
+*.order
+*.mod
+*.mod.c
+*.ko
